@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "book-scrapper"
+version = "0.1.0"
+description = "Resumable multi-site book discovery and download pipeline"
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31,<3",
+  "beautifulsoup4>=4.12,<5",
+  "playwright>=1.50,<2",
+  "google-api-python-client>=2.100,<3",
+  "google-auth-httplib2>=0.2,<1",
+  "google-auth-oauthlib>=1.2,<2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+mega = ["mega.py==1.0.8"]
+
+[project.scripts]
+book-scrapper = "book_scrapper.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["book_scrapper*"]
