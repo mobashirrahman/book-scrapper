@@ -11,6 +11,7 @@ from book_scrapper.sites import (
     BanglaBookshelf,
     BanglaBooksIn,
     BengaliOnline,
+    BnWikisource,
     Boighor,
     Boiprakash,
     DPLELibrary,
@@ -18,6 +19,7 @@ from book_scrapper.sites import (
     Granthagara,
     KindleBangla,
     LiberationWarBangladesh,
+    Nctb,
     NDLI,
     PdfPoro,
     ProjectGutenberg,
@@ -54,6 +56,7 @@ class Client:
     "boiprakash", "pdfporo", "boighor", "gutenberg_bengali", "ndli",
     "kindlebangla", "liberationwarbangladesh", "banglabook", "allbanglaboi",
     "banglabooks_in", "banglabookshelf", "worldmets", "archive_bengali",
+    "bn_wikisource", "nctb",
 ])
 def test_all_new_sources_are_registered(name):
     assert name in SITES
@@ -80,6 +83,8 @@ def test_all_new_sources_are_registered(name):
     (BanglaBookshelf(), "https://www.banglabookshelf.com/Story%20Books/Himu/himu-books.php", "https://www.banglabookshelf.com/Story%20Books/Himu/Himu.pdf"),
     (WorldMets(), "https://www.worldmets.com/author-slug/book-slug/", "https://drive.google.com/file/d/abc/view"),
     (ArchiveBengali(), "https://archive.org/details/someid/", "https://archive.org/download/someid/someid.pdf"),
+    (BnWikisource(), "https://bn.wikisource.org/wiki/Sample_Book", "https://ws-export.wmcloud.org/?format=epub&lang=bn&page=Sample_Book"),
+    (Nctb(), "https://nctb.cloud/textbooks/2026/primary/class-1/", "https://drive.google.com/file/d/abc/view"),
 ])
 def test_detail_parsing_separates_assets_and_access_links(site, post, asset):
     asset_markup = f'<a href="{asset}">Download PDF</a>' if asset else ""
@@ -352,6 +357,68 @@ def test_resolve_drive_file_falls_back_to_uc_without_key(monkeypatch, tmp_path):
     monkeypatch.setenv("BOOK_SCRAPPER_CONFIG", str(tmp_path))
     with pytest.raises(Unsupported, match="API key"):
         resolve(None, "https://drive.google.com/file/d/abc123/view")
+
+
+def test_gdrive_media_url_round_trip():
+    from book_scrapper.gdrive import media_url, parse_media_file_id, uc_download_url
+
+    assert parse_media_file_id(media_url("abc123", "key")) == "abc123"
+    assert parse_media_file_id("https://drive.google.com/uc?export=download&id=abc123") is None
+    assert parse_media_file_id("https://example.com/drive/v3/files/abc123") is None
+    assert uc_download_url("abc123") == "https://drive.google.com/uc?export=download&id=abc123"
+
+
+class _StreamResponse:
+    def __init__(self, payload):
+        self._payload = payload
+        self.headers = {"Content-Length": str(len(payload))}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def iter_content(self, size):
+        yield self._payload
+
+
+class _FallbackClient:
+    """403s the Drive API media URL, serves the direct uc URL."""
+
+    def __init__(self):
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        import requests
+
+        self.calls.append(url)
+        if "googleapis.com" in url:
+            response = requests.Response()
+            response.status_code = 403
+            response.url = url
+            raise requests.HTTPError("403 Client Error: Forbidden", response=response)
+        return _StreamResponse(b"%PDF-1.4 fake")
+
+
+def test_download_retries_drive_api_403_through_direct_uc(tmp_path, monkeypatch):
+    from book_scrapper.pipeline import Pipeline
+
+    monkeypatch.setenv("GOOGLE_DRIVE_API_KEY", "test-key")
+    site = Nctb()
+    page = site.root + "textbooks/2017/primary/class-1/"
+    asset = "https://drive.google.com/file/d/abc123/view"
+    client = _FallbackClient()
+    pipeline = Pipeline(tmp_path, site, client)
+    with pipeline.db:
+        pipeline.db.execute("INSERT INTO pages(site,url) VALUES (?,?)", (site.name, page))
+        pipeline.db.execute("INSERT INTO assets(url) VALUES (?)", (asset,))
+        pipeline.db.execute("INSERT INTO links VALUES (?,?,?)", (page, asset, "book"))
+    pipeline.download()
+    row = pipeline.db.execute("SELECT status, bytes FROM assets WHERE url=?", (asset,)).fetchone()
+    assert tuple(row) == ("done", len(b"%PDF-1.4 fake"))
+    assert client.calls[0].startswith("https://www.googleapis.com/drive/v3/files/abc123?")
+    assert client.calls[1] == "https://drive.google.com/uc?export=download&id=abc123"
 
 
 def test_lwb_identifies_wordpress_posts_and_drive_files():
@@ -731,3 +798,98 @@ def test_archive_bengali_discovery_resolves_files_and_skips_granthagara_ids(tmp_
         ("https://archive.org/download/freshid/freshid.pdf",)]
     # Second run is stable: own pages are skipped too.
     assert site.discover_catalogue(client, db, limit=10) == 0
+
+
+def test_bn_wikisource_posts_and_export_assets():
+    site = BnWikisource()
+    assert site.is_post("https://bn.wikisource.org/wiki/গল্পসল্প/ধ্বংস")
+    assert not site.is_post("https://bn.wikisource.org/wiki/বিশেষ:সাম্প্রতিক_পরিবর্তন")
+    assert not site.is_post("https://bn.wikisource.org/")
+    assert not site.is_post("https://ws-export.wmcloud.org/?format=epub&lang=bn&page=X")
+    assert site.is_asset("https://ws-export.wmcloud.org/?format=epub&lang=bn&page=Sample_Book")
+    assert site.is_asset("https://ws-export.wmcloud.org/?format=pdf&lang=bn&page=X")
+    assert not site.is_asset("https://ws-export.wmcloud.org/?format=epub&lang=en&page=X")
+    assert not site.is_asset("https://bn.wikisource.org/wiki/Sample_Book")
+    page = site.parse(
+        "https://bn.wikisource.org/wiki/Sample_Book",
+        '<article><h1>Sample</h1>'
+        '<a href="https://ws-export.wmcloud.org/?format=epub&lang=bn&page=Sample_Book">EPUB ডাউনলোড</a>'
+        '<a href="https://viewer.example/record/1">Read online</a></article>',
+    )
+    assert [url for url, _ in page.links] == ["https://ws-export.wmcloud.org/?format=epub&lang=bn&page=Sample_Book"]
+    assert [url for url, _ in page.metadata_links] == ["https://viewer.example/record/1"]
+
+
+def _wikisource_api_payload(titles, apcontinue=""):
+    import json
+
+    payload = {"query": {"allpages": [{"pageid": i + 1, "ns": 0, "title": t} for i, t in enumerate(titles)]}}
+    if apcontinue:
+        payload["continue"] = {"apcontinue": apcontinue, "continue": "-||"}
+    return json.dumps(payload)
+
+
+def test_bn_wikisource_discovery_paginates_and_records_exports(tmp_path):
+    site = BnWikisource()
+    db = sqlite3.connect(tmp_path / "catalog.sqlite3")
+    db.execute("CREATE TABLE pages (site TEXT NOT NULL, url TEXT PRIMARY KEY, title TEXT, status TEXT NOT NULL DEFAULT 'pending', error TEXT)")
+    db.execute("CREATE TABLE assets (url TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', path TEXT, sha256 TEXT, bytes INTEGER, error TEXT)")
+    db.execute("CREATE TABLE links (page_url TEXT, asset_url TEXT, label TEXT, PRIMARY KEY(page_url, asset_url))")
+    db.commit()
+    template = BnWikisource._api_template
+    client = Client({
+        template.format(cont=""): _wikisource_api_payload(["Main Page", "গল্পসল্প/ধ্বংস", "Sample Book"], "Next"),
+        template.format(cont="&apcontinue=Next"): _wikisource_api_payload(["Third"]),
+    })
+    assert site.discover_catalogue(client, db) == 3
+    rows = db.execute("SELECT title, status FROM pages").fetchall()
+    assert sorted(rows) == [("Sample Book", "done"), ("Third", "done"), ("গল্পসল্প/ধ্বংস", "done")]
+    assert db.execute("SELECT COUNT(*) FROM assets").fetchone()[0] == 3
+    assert db.execute("SELECT COUNT(*) FROM links").fetchone()[0] == 3
+    assert "ws-export.wmcloud.org" in db.execute("SELECT asset_url FROM links LIMIT 1").fetchone()[0]
+
+
+def test_nctb_posts_follow_year_level_class_shape():
+    site = Nctb()
+    assert site.is_post("https://nctb.cloud/textbooks/")
+    assert site.is_post("https://nctb.cloud/textbooks/2017/")
+    assert site.is_post("https://nctb.cloud/textbooks/2017/primary/")
+    assert site.is_post("https://nctb.cloud/textbooks/2017/primary/class-1/")
+    assert not site.is_post("https://nctb.cloud/")
+    assert not site.is_post("https://nctb.cloud/teachers/")
+    assert not site.is_post("https://nctb.cloud/textbooks/2017/primary/class-1/?x=1")
+    assert not site.is_post("https://nctb.cloud/textbooks/a/b/c/d/")
+    assert site.is_asset("https://drive.google.com/file/d/abc/view")
+    assert site.is_asset("https://drive.google.com/uc?export=download&id=abc")
+
+
+def test_nctb_discovery_collects_shelves_and_crawl_expands(tmp_path):
+    site = Nctb()
+    shelf = site.root + "textbooks/"
+    year = site.root + "textbooks/2017/"
+    client = Client({
+        site.root: '<a href="/textbooks/">Textbooks</a>',
+        shelf: f'<a href="{year}">2017</a><a href="/teachers/">Teachers</a>',
+    })
+    db = sqlite3.connect(tmp_path / "catalog.sqlite3")
+    db.execute("CREATE TABLE pages (site TEXT NOT NULL, url TEXT PRIMARY KEY, title TEXT, status TEXT NOT NULL DEFAULT 'pending', error TEXT)")
+    db.commit()
+    # Seeds are first-level only: root yields the shelf; crawl expands the year.
+    assert site.discover_catalogue(client, db) == 1
+    pipeline = Pipeline(tmp_path, site, client)
+    assert pipeline.crawl() == 1
+    urls = [row[0] for row in pipeline.db.execute("SELECT url FROM pages ORDER BY url")]
+    assert urls == [shelf, year]
+
+
+def test_nctb_parse_queues_drive_assets():
+    site = Nctb()
+    post = "https://nctb.cloud/textbooks/2017/primary/class-1/"
+    page = site.parse(
+        post,
+        '<article><h1>Class 1</h1>'
+        '<a href="https://drive.google.com/uc?export=download&id=abc">আমার বাংলা বই</a>'
+        '<a href="https://viewer.example/record/1">Read online</a></article>',
+    )
+    assert [url for url, _ in page.links] == ["https://drive.google.com/uc?export=download&id=abc"]
+    assert [url for url, _ in page.metadata_links] == ["https://viewer.example/record/1"]

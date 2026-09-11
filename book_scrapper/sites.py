@@ -41,9 +41,9 @@ class Amarboi:
 
 from .sources import (
     AllBanglaBoi, ArchiveBengali, BDeBooks, BanglaBook, BanglaBookshelf,
-    BanglaBooksIn, Granthagara, BengaliOnline, FID4SA, DPLELibrary, Boiprakash,
-    PdfPoro, Boighor, ProjectGutenberg, NDLI, KindleBangla,
-    LiberationWarBangladesh, WorldMets,
+    BanglaBooksIn, BnWikisource, Granthagara, BengaliOnline, FID4SA,
+    DPLELibrary, Boiprakash, Nctb, PdfPoro, Boighor, ProjectGutenberg, NDLI,
+    KindleBangla, LiberationWarBangladesh, WorldMets,
 )
 Bdebooks = BDeBooks
 Banglabook = BanglaBook
@@ -60,7 +60,7 @@ Ndli = NDLI
 Liberationwarbangladesh = LiberationWarBangladesh
 
 for _adapter in (Amarboi, BDeBooks, BanglaBook, AllBanglaBoi, BanglaBooksIn,
-                  BanglaBookshelf, WorldMets, ArchiveBengali,
+                  BanglaBookshelf, WorldMets, ArchiveBengali, BnWikisource, Nctb,
                   Granthagara, BengaliOnline, FID4SA, DPLELibrary, Boiprakash,
                   PdfPoro, Boighor, ProjectGutenberg, NDLI, KindleBangla,
                   LiberationWarBangladesh):
@@ -71,5 +71,5 @@ SITES = {adapter().name: adapter() for adapter in (
     Amarboi, BDeBooks, Granthagara, BengaliOnline, FID4SA, DPLELibrary,
     Boiprakash, PdfPoro, Boighor, ProjectGutenberg, NDLI, KindleBangla,
     BanglaBook, AllBanglaBoi, BanglaBooksIn, BanglaBookshelf, WorldMets,
-    ArchiveBengali, LiberationWarBangladesh,
+    ArchiveBengali, BnWikisource, Nctb, LiberationWarBangladesh,
 )}

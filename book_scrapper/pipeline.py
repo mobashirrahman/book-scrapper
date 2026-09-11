@@ -42,6 +42,43 @@ def resolve(client, url):
     return url
 
 
+def _store_response(client, url, temp, max_bytes):
+    """Stream one URL to temp, returning (digest, size, first-chunk prefix)."""
+    import hashlib
+
+    digest, size, prefix = hashlib.sha256(), 0, b""
+    with client.get(url, stream=True) as r:
+        length = r.headers.get("Content-Length")
+        if length and int(length) > max_bytes:
+            raise ValueError("File exceeds size limit")
+        with temp.open("wb") as out:
+            for chunk in r.iter_content(64 * 1024):
+                if not chunk:
+                    continue
+                if not prefix:
+                    prefix = chunk
+                    file_extension(prefix)
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ValueError("File exceeds size limit")
+                digest.update(chunk)
+                out.write(chunk)
+    return digest, size, prefix
+
+
+def _is_forbidden(exc):
+    response = getattr(exc, "response", None)
+    return response is not None and getattr(response, "status_code", None) == 403
+
+
+def _drive_fallback_url(resolved):
+    """Direct uc URL when the Drive API media endpoint 403s on a file."""
+    from .gdrive import parse_media_file_id, uc_download_url
+
+    file_id = parse_media_file_id(resolved)
+    return uc_download_url(file_id) if file_id else None
+
+
 def file_extension(prefix):
     if prefix.startswith(b"%PDF-"):
         return ".pdf"
@@ -161,23 +198,17 @@ class Pipeline:
                     resolved = site_resolver(self.client, url)
                 else:
                     resolved = resolve(self.client, url)
-                digest, size, prefix = hashlib.sha256(), 0, b""
-                with self.client.get(resolved, stream=True) as r:
-                    length = r.headers.get("Content-Length")
-                    if length and int(length) > max_bytes:
-                        raise ValueError("File exceeds size limit")
-                    with temp.open("wb") as out:
-                        for chunk in r.iter_content(64 * 1024):
-                            if not chunk:
-                                continue
-                            if not prefix:
-                                prefix = chunk
-                                file_extension(prefix)
-                            size += len(chunk)
-                            if size > max_bytes:
-                                raise ValueError("File exceeds size limit")
-                            digest.update(chunk)
-                            out.write(chunk)
+                try:
+                    digest, size, prefix = _store_response(self.client, resolved, temp, max_bytes)
+                except Exception as exc:
+                    # Some publicly shared files 403 on the API media endpoint
+                    # but download fine through the direct uc endpoint.
+                    fallback = _drive_fallback_url(resolved) if _is_forbidden(exc) else None
+                    if fallback is None:
+                        raise
+                    temp.unlink(missing_ok=True)
+                    print(f"Drive API 403, retrying direct: {url}", flush=True)
+                    digest, size, prefix = _store_response(self.client, fallback, temp, max_bytes)
                 extension = file_extension(prefix)
                 if extension == ".zip":
                     import zipfile

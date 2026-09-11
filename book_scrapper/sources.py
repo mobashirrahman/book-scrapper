@@ -838,6 +838,155 @@ class ArchiveBengali(SitemapAdapter):
         return count
 
 
+class BnWikisource(SitemapAdapter):
+    """API catalogue adapter for Bengali Wikisource (public-domain works).
+
+    Discovery pages main-namespace works through the MediaWiki API
+    (``list=allpages``) and records one done page per work with its
+    WS-Export ebook asset.  EPUB is preferred: it renders in under a second
+    while first-time PDF renders can take minutes.  Export URLs are generated
+    per work, so they never overlap the archive.org/granthagara holdings.
+    """
+
+    name = "bn_wikisource"
+    root = "https://bn.wikisource.org/"
+    hosts = {"bn.wikisource.org", "ws-export.wmcloud.org"}
+    capability = "official-api-ebooks"
+    status = "enabled"
+    discovery = "catalogue"
+    post_pattern = re.compile(r"/wiki/[^:?#]+$")
+    _api_template = (
+        "https://bn.wikisource.org/w/api.php?action=query&list=allpages"
+        "&apnamespace=0&aplimit=500&format=json{cont}"
+    )
+    _export_template = "https://ws-export.wmcloud.org/?format=epub&lang=bn&page={title}"
+    # Sort-order debris at the top of the main namespace, not books.
+    _skip_titles = frozenset({"Main Page", "Main page", "Lh"})
+
+    @classmethod
+    def _is_book_title(cls, title):
+        if not title or len(title) < 3 or title in cls._skip_titles:
+            return False
+        return not title.startswith("H:")
+
+    def _page_url(self, title):
+        from urllib.parse import quote
+
+        return f"{self.root}wiki/{quote(title.replace(' ', '_'), safe='/:')}"
+
+    def _export_url(self, title):
+        from urllib.parse import quote
+
+        return self._export_template.format(title=quote(title, safe=""))
+
+    def is_post(self, url):
+        if not self.owns(url):
+            return False
+        parts = urlsplit(url)
+        if parts.hostname == "ws-export.wmcloud.org":
+            return False
+        return bool(re.fullmatch(r"/wiki/[^:?#]+", parts.path))
+
+    def is_asset(self, url):
+        parts = urlsplit(url)
+        if (parts.hostname or "").lower() != "ws-export.wmcloud.org":
+            return False
+        query = parts.query.lower()
+        return "lang=bn" in query and any(f"format={fmt}" in query for fmt in ("epub", "pdf", "mobi"))
+
+    def discover_catalogue(self, client, db, limit=None):
+        count = processed = 0
+        cont = ""
+        while True:
+            try:
+                with client.get(self._api_template.format(cont=cont)) as response:
+                    payload = json.loads(response.text)
+            except Exception:
+                break
+            query = payload.get("query", {}) if isinstance(payload, dict) else {}
+            members = query.get("allpages", []) or []
+            if not members:
+                break
+            for member in members:
+                title = (member.get("title", "") or "").strip()
+                if not self._is_book_title(title):
+                    continue
+                page_url = self._page_url(title)
+                target = self._export_url(title)
+                processed += 1
+                with db:
+                    count += db.execute(
+                        "INSERT OR IGNORE INTO pages(site,url,title,status) VALUES (?,?,?,?)",
+                        (self.name, page_url, title, "done"),
+                    ).rowcount
+                    db.execute("INSERT OR IGNORE INTO assets(url) VALUES (?)", (target,))
+                    db.execute("INSERT OR REPLACE INTO links VALUES (?,?,?)", (page_url, target, title))
+                if limit is not None and processed >= limit:
+                    return count
+            block = payload.get("continue") or {}
+            cont = ""
+            if isinstance(block, dict) and block.get("apcontinue"):
+                from urllib.parse import quote
+
+                cont = f"&apcontinue={quote(block['apcontinue'], safe='')}"
+            if not cont:
+                break
+        return count
+
+
+class Nctb(WordPressBookSite):
+    """Catalogue adapter for NCTB textbooks (official Bangladesh textbooks).
+
+    The library is browsed as year → level → class pages
+    (``/textbooks/<year>/<level>/<class>/``); class pages embed Google Drive
+    file links for each textbook, which are queued as assets through the
+    shared third-party-host rule and resolved with the Drive API key.
+    """
+
+    name = "nctb"
+    root = "https://nctb.cloud/"
+    hosts = {"nctb.cloud", "www.nctb.cloud"}
+    capability = "official-textbooks-drive-files"
+    status = "enabled"
+    discovery = "catalogue"
+    post_pattern = re.compile(r"/textbooks/[^/?#]+/?$")
+
+    def is_post(self, url):
+        if not self.owns(url):
+            return False
+        parts = urlsplit(url)
+        if parts.query:
+            return False
+        segments = [seg for seg in parts.path.split("/") if seg]
+        if not segments or segments[0] != "textbooks":
+            return False
+        if len(segments) > 4 or any(seg.lower() in {"feed", "page"} for seg in segments):
+            return False
+        return all(re.fullmatch(r"[a-z0-9][a-z0-9\-]*", seg, re.I) for seg in segments[1:])
+
+    def parse(self, url, html):
+        # Shelf pages link to sub-shelves with plain labels (years, levels),
+        # so post links must stay in the queue channel instead of being
+        # dropped as non-metadata navigation.
+        soup = BeautifulSoup(html, "html.parser")
+        title = _title(soup, url)
+        assets, metadata, seen = [], [], set()
+        for anchor in _content(soup).select("a[href]"):
+            target = clean_url(url, anchor.get("href", ""))
+            if not target or target == url or target in seen:
+                continue
+            seen.add(target)
+            label = anchor.get_text(" ", strip=True)
+            if self.is_asset(target) or self.is_post(target):
+                assets.append((target, label))
+            elif self._metadata_link(target, label):
+                metadata.append((target, label))
+        return Page(title, assets, metadata)
+
+    def discover_catalogue(self, client, db, limit=None):
+        return _discover_catalogue(self, client, db, (self.root, self.root + "textbooks/"), limit)
+
+
 # Friendly aliases for callers that use the source's displayed name.
 Fid4SA = FID4SA
 DplElibrary = DPLELibrary

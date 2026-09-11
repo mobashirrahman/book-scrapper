@@ -81,6 +81,20 @@ def media_url(file_id, key):
     return f"https://www.googleapis.com/drive/v3/files/{file_id}?key={key}&alt=media"
 
 
+def parse_media_file_id(url):
+    """Return the file id from a Drive API media URL, else None."""
+    parts = urlsplit(url)
+    if (parts.hostname or "").lower() != "www.googleapis.com":
+        return None
+    match = re.search(r"/drive/v3/files/([^/?#]+)", parts.path)
+    return match.group(1) if match else None
+
+
+def uc_download_url(file_id):
+    """Direct download endpoint, used when the API endpoint 403s on a file."""
+    return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+
 def _default_service_factory(api_key):
     try:
         from googleapiclient.discovery import build
