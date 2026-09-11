@@ -40,10 +40,15 @@ class Amarboi:
 
 
 from .sources import (
-    BDeBooks, Granthagara, BengaliOnline, FID4SA, DPLELibrary,
-    Boiprakash, PdfPoro, Boighor, ProjectGutenberg, NDLI,
+    AllBanglaBoi, ArchiveBengali, BDeBooks, BanglaBook, BanglaBookshelf,
+    BanglaBooksIn, Granthagara, BengaliOnline, FID4SA, DPLELibrary, Boiprakash,
+    PdfPoro, Boighor, ProjectGutenberg, NDLI, KindleBangla,
+    LiberationWarBangladesh, WorldMets,
 )
 Bdebooks = BDeBooks
+Banglabook = BanglaBook
+Allbanglaboi = AllBanglaBoi
+Banglabooksin = BanglaBooksIn
 GranthagaraAdapter = Granthagara
 BengaliOnlineNet = BengaliOnline
 Fid4SA = Fid4sa = FID4SA
@@ -52,14 +57,19 @@ Pdfporo = PdfPoro
 Boighorlibrary = Boighor
 ProjectGutenbergBengali = Gutenberg = ProjectGutenberg
 Ndli = NDLI
+Liberationwarbangladesh = LiberationWarBangladesh
 
-for _adapter in (Amarboi, BDeBooks, Granthagara, BengaliOnline, FID4SA,
-                  DPLELibrary, Boiprakash, PdfPoro, Boighor,
-                  ProjectGutenberg, NDLI):
+for _adapter in (Amarboi, BDeBooks, BanglaBook, AllBanglaBoi, BanglaBooksIn,
+                  BanglaBookshelf, WorldMets, ArchiveBengali,
+                  Granthagara, BengaliOnline, FID4SA, DPLELibrary, Boiprakash,
+                  PdfPoro, Boighor, ProjectGutenberg, NDLI, KindleBangla,
+                  LiberationWarBangladesh):
     _adapter.download_capability = property(lambda self: self.capability)
     _adapter.adapter_status = property(lambda self: getattr(self, "status", "enabled"))
 
 SITES = {adapter().name: adapter() for adapter in (
     Amarboi, BDeBooks, Granthagara, BengaliOnline, FID4SA, DPLELibrary,
-    Boiprakash, PdfPoro, Boighor, ProjectGutenberg, NDLI,
+    Boiprakash, PdfPoro, Boighor, ProjectGutenberg, NDLI, KindleBangla,
+    BanglaBook, AllBanglaBoi, BanglaBooksIn, BanglaBookshelf, WorldMets,
+    ArchiveBengali, LiberationWarBangladesh,
 )}

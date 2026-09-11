@@ -1,8 +1,10 @@
 import hashlib
 import json
+import os
+import uuid
 from pathlib import Path
 import sqlite3
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -14,12 +16,17 @@ class Unsupported(ValueError):
 def resolve(client, url):
     host = urlsplit(url).hostname or ""
     if host in {"drive.google.com", "docs.google.com"}:
-        import re
-        match = re.search(r"/d/([^/]+)", urlsplit(url).path)
-        file_id = match.group(1) if match else parse_qs(urlsplit(url).query).get("id", [None])[0]
+        from .gdrive import media_url, parse_drive_file_id, read_api_key
+        file_id = parse_drive_file_id(url)
         if not file_id:
             raise Unsupported("Google Drive folder or unrecognized link")
-        return "https://drive.google.com/uc?export=download&id=" + file_id
+        key = read_api_key()
+        if not key:
+            raise Unsupported(
+                "Google Drive files require an API key "
+                "(set GOOGLE_DRIVE_API_KEY or ~/.config/book-scrapper/drive_api_key)"
+            )
+        return media_url(file_id, key)
     if host in {"mediafire.com", "www.mediafire.com"}:
         with client.get(url) as response:
             soup = BeautifulSoup(response.text, "html.parser")
@@ -56,8 +63,12 @@ class Pipeline:
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.site, self.client = site, client
-        self.db = sqlite3.connect(self.directory / "catalog.sqlite3")
+        self.db = sqlite3.connect(self.directory / "catalog.sqlite3", timeout=30.0)
         self.db.row_factory = sqlite3.Row
+        # Tolerate brief contention (e.g. status/export while downloading).
+        self.db.execute("PRAGMA journal_mode=WAL;")
+        self.db.execute("PRAGMA busy_timeout=30000;")
+        self.db.execute("PRAGMA synchronous=NORMAL;")
         self.db.executescript('''
         CREATE TABLE IF NOT EXISTS pages (
           site TEXT NOT NULL, url TEXT PRIMARY KEY, title TEXT,
@@ -74,6 +85,8 @@ class Pipeline:
         ''')
 
     def discover(self):
+        if getattr(self.site, "discovery", "sitemap") == "catalogue":
+            return self.site.discover_catalogue(self.client, self.db)
         # Re-enumerate sitemaps on each discovery run to pick up new posts.
         pending, seen = [self.site.root + "sitemap.xml"], set()
         count = 0
@@ -128,9 +141,26 @@ class Pipeline:
         folder.mkdir(exist_ok=True)
         for row in rows:
             url = row["url"]
-            temp = folder / (hashlib.sha256(url.encode()).hexdigest() + ".part")
+            # Unique temp per process: the old deterministic "<sha256(url)>.part"
+            # made concurrent workers truncate/write the same file, producing
+            # interleaved/corrupt content and ".part -> .pdf: No such file"
+            # rename races. Separate temps make replace() atomic (last wins).
+            url_hash = hashlib.sha256(url.encode()).hexdigest()
+            temp = folder / f"{url_hash}.{os.getpid()}.{uuid.uuid4().hex[:8]}.part"
             try:
-                resolved = resolve(self.client, url)
+                # Skip work already finished after our initial snapshot
+                # (e.g. a peer worker got there first before locking existed).
+                current = self.db.execute("SELECT status, path FROM assets WHERE url=?", (url,)).fetchone()
+                if current and current["status"] == "done" and current["path"]:
+                    if (self.directory / current["path"]).exists():
+                        continue
+                # Site-specific resolution (e.g. KindleBangla /download/ links that
+                # redirect to Drive folders) falls back to the generic resolver.
+                site_resolver = getattr(self.site, "resolve_asset", None)
+                if site_resolver is not None:
+                    resolved = site_resolver(self.client, url)
+                else:
+                    resolved = resolve(self.client, url)
                 digest, size, prefix = hashlib.sha256(), 0, b""
                 with self.client.get(resolved, stream=True) as r:
                     length = r.headers.get("Content-Length")
@@ -171,7 +201,7 @@ class Pipeline:
 
     def status(self):
         pages = dict(self.db.execute("SELECT status,count(*) FROM pages WHERE site=? GROUP BY status", (self.site.name,)))
-        assets = dict(self.db.execute("SELECT status,count(DISTINCT a.url) FROM assets a JOIN links l ON a.url=l.asset_url JOIN pages p ON p.url=l.page_url WHERE p.site=? GROUP BY a.status", (self.site.name,)))
+        assets = dict(self.db.execute("SELECT a.status,count(DISTINCT a.url) FROM assets a JOIN links l ON a.url=l.asset_url JOIN pages p ON p.url=l.page_url WHERE p.site=? GROUP BY a.status", (self.site.name,)))
         return {"site": self.site.name, "pages": pages, "assets": assets}
 
     def export(self, path):

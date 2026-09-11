@@ -6,9 +6,10 @@ the adapter has a source-specific, non-authenticated file rule); viewer,
 lending, metadata and download-handler links remain metadata.
 """
 
+import json
 import re
 import xml.etree.ElementTree as ET
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
@@ -327,6 +328,243 @@ class NDLI(SitemapAdapter):
         return _discover_catalogue(self, client, db, seeds, limit)
 
 
+class KindleBangla(SitemapAdapter):
+    """Catalogue adapter for KindleBangla with Drive-folder downloads.
+
+    Book pages live at /book/<hex-id> (as listed in sitemap.xml) and also
+    resolve by Bengali slug (/book/<slug>). The per-book /download/<slug>
+    endpoint 302-redirects to a Google Drive *folder*; ``resolve_asset``
+    follows that redirect and resolves the folder to its single book file
+    through the official Drive API (see ``gdrive`` — needs
+    ``GOOGLE_DRIVE_API_KEY`` for public folders). Folders that are empty,
+    multi-file, private, or keyless stay ``unsupported`` instead of guessing.
+    """
+
+    name = "kindlebangla"
+    root = "https://www.kindlebangla.com/"
+    hosts = {"kindlebangla.com", "www.kindlebangla.com"}
+    capability = "metadata-only"
+    status = "metadata-only-catalogue"
+    post_pattern = re.compile(r"/book/[^/?#]+/?")
+
+    def is_asset(self, url):
+        return self.owns(url) and urlsplit(url).path.startswith("/download/")
+
+    def resolve_asset(self, client, url, drive_service_factory=None):
+        from .gdrive import (
+            media_url,
+            parse_drive_file_id,
+            parse_drive_folder_id,
+            read_api_key,
+            resolve_folder_file,
+        )
+        from .pipeline import Unsupported
+
+        with client.get(url) as response:
+            final = response.url
+        folder_id = parse_drive_folder_id(final)
+        if folder_id is not None:
+            return resolve_folder_file(folder_id, service_factory=drive_service_factory)
+        file_id = parse_drive_file_id(final)
+        if file_id is not None:
+            key = read_api_key()
+            if not key:
+                raise Unsupported(
+                    "KindleBangla landed on a Drive file but no API key is set "
+                    "(set GOOGLE_DRIVE_API_KEY or ~/.config/book-scrapper/drive_api_key)"
+                )
+            return media_url(file_id, key)
+        raise Unsupported(f"KindleBangla download did not land on a Drive folder or file: {final}")
+
+
+class WordPressBookSite(SitemapAdapter):
+    """WordPress book catalogue whose downloads live on third-party file hosts.
+
+    Download links point to Google Drive, MediaFire, MEGA, Box etc. instead of
+    files served by the site itself, so those hosts are queued as assets while
+    viewer/lending metadata links stay out of the download queue.
+    """
+
+    _download_hosts = {
+        "drive.google.com", "docs.google.com", "drive.usercontent.google.com",
+        "mediafire.com", "www.mediafire.com",
+        "mega.nz", "mega.co.nz", "www.mega.nz", "www.mega.co.nz",
+        "app.box.com", "box.com", "www.box.com",
+        "dropbox.com", "www.dropbox.com", "dl.dropboxusercontent.com",
+        "drive.googleusercontent.com",
+    }
+
+    def is_asset(self, url):
+        host = (urlsplit(url).hostname or "").lower()
+        if host in self._download_hosts:
+            return True
+        return self.owns(url) and urlsplit(url).path.lower().endswith(BOOK_EXTENSIONS)
+
+
+class BanglaBook(WordPressBookSite):
+    name = "banglabook"
+    root = "https://www.banglabook.org/"
+    hosts = {"banglabook.org", "www.banglabook.org"}
+    _SITEMAP_INDEX = root + "wp-sitemap.xml"
+    sitemap_marker = "post-sitemap"
+    post_pattern = re.compile(r"/[a-z0-9][a-z0-9\-]+/?$", re.I)
+
+    def is_post(self, url):
+        if not self.owns(url):
+            return False
+        path = urlsplit(url).path
+        return bool(re.fullmatch(r"/[a-z0-9][a-z0-9\-]+/?", path, re.I))
+
+
+class AllBanglaBoi(SitemapAdapter):
+    name = "allbanglaboi"
+    root = "https://allbanglaboi.com/"
+    hosts = {"allbanglaboi.com", "www.allbanglaboi.com"}
+    capability = "metadata-only"
+    status = "metadata-only-catalogue"
+    discovery = "catalogue"
+    post_pattern = re.compile(r"/(?:\d+/|[a-z0-9][a-z0-9\-]+/?$)", re.I)
+
+    def is_post(self, url):
+        if not self.owns(url):
+            return False
+        path = urlsplit(url).path
+        if path in {"/", ""}:
+            return False
+        return bool(re.fullmatch(r"/(?:\d+/|[a-z0-9][a-z0-9\-]+/?$)", path, re.I))
+
+    def discover_catalogue(self, client, db, limit=None):
+        count = processed = page = 0
+        while True:
+            page += 1
+            url = self.root + f"wp-json/wp/v2/posts?per_page=100&page={page}"
+            try:
+                with client.get(url) as response:
+                    posts = json.loads(response.text)
+            except Exception:
+                break
+            if not isinstance(posts, list) or not posts:
+                break
+            for post in posts:
+                post_id = post.get("id")
+                if not post_id:
+                    continue
+                link = post.get("link", "")
+                processed += 1
+                with db:
+                    count += db.execute(
+                        "INSERT OR IGNORE INTO pages(site,url) VALUES (?,?)",
+                        (self.name, link if link else self.root + str(post_id)),
+                    ).rowcount
+                if limit is not None and processed >= limit:
+                    return count
+        return count
+
+
+class BanglaBooksIn(WordPressBookSite):
+    name = "banglabooks_in"
+    root = "https://www.banglabooks.in/"
+    hosts = {"banglabooks.in", "www.banglabooks.in"}
+    _SITEMAP_INDEX = root + "wp-sitemap.xml"
+    sitemap_marker = "post-sitemap"
+    post_pattern = re.compile(r"/[^/?#]+/[^/?#]+/?$")
+
+    def is_post(self, url):
+        if not self.owns(url):
+            return False
+        parts = urlsplit(url)
+        # Ignore share/utm variants that repeat the same post.
+        if parts.query:
+            return False
+        path = parts.path
+        return bool(re.fullmatch(r"/[a-z0-9][a-z0-9\-]+/[a-z0-9][a-z0-9\-]+/?", path, re.I))
+
+
+class LiberationWarBangladesh(SitemapAdapter):
+    """Catalogue adapter for the Muktijuddho e-Archive (liberationwarbangladesh.org).
+
+    The archive runs WordPress with ``?p=<id>`` post URLs. Full-text posts and
+    newspaper series are published publicly. Books are presented through the
+    FlipHTML5 viewer on the ``doc.liberationwarbangladesh.net/books/<code>``
+    vanity domain; the underlying page images live on
+    ``online.fliphtml5.com/lzrut/<code>/files/``. The viewer and other lending
+    hosts stay metadata; only Google Drive file links (and direct book files)
+    are queued as download candidates, so restricted Drive items are resolved
+    through the generic resolver and reported instead of being bypassed.
+    """
+
+    name = "liberationwarbangladesh"
+    root = "https://liberationwarbangladesh.org/"
+    hosts = {
+        "liberationwarbangladesh.org", "www.liberationwarbangladesh.org",
+        "liberationwarbangladesh.com", "www.liberationwarbangladesh.com",
+        "liberationwarbangladesh.net", "www.liberationwarbangladesh.net",
+        "doc.liberationwarbangladesh.net",
+    }
+    capability = "rest-catalogue-and-public-file-candidates"
+    status = "enabled"
+    discovery = "catalogue"
+    _drive_hosts = {"drive.google.com", "docs.google.com", "drive.usercontent.google.com"}
+
+    def is_post(self, url):
+        if not self.owns(url):
+            return False
+        parts = urlsplit(url)
+        return bool(re.fullmatch(r"p=\d+", parts.query))
+
+    def is_asset(self, url):
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        if host in self._drive_hosts:
+            return "/file/d/" in parts.path or "export=download" in parts.query or "id=" in parts.query
+        return parts.path.lower().endswith(BOOK_EXTENSIONS)
+
+    def discover_catalogue(self, client, db, limit=None):
+        count = processed = page = 0
+        while True:
+            page += 1
+            url = self.root + f"index.php?rest_route=/wp/v2/posts&per_page=100&page={page}"
+            try:
+                with client.get(url) as response:
+                    posts = json.loads(response.text)
+            except Exception:
+                break
+            if not isinstance(posts, list) or not posts:
+                break
+            for post in posts:
+                post_id = post.get("id")
+                if not post_id:
+                    continue
+                processed += 1
+                with db:
+                    count += db.execute(
+                        "INSERT OR IGNORE INTO pages(site,url) VALUES (?,?)",
+                        (self.name, f"{self.root}?p={post_id}"),
+                    ).rowcount
+                if limit is not None and processed >= limit:
+                    return count
+        return count
+
+    def parse(self, url, html):
+        soup = BeautifulSoup(html, "html.parser")
+        title = _title(soup, url)
+        assets, metadata, seen = [], [], set()
+        for anchor in _content(soup).select("a[href]"):
+            target = clean_url(url, anchor.get("href", ""))
+            if not target or target == url or target in seen:
+                continue
+            parts = urlsplit(target)
+            if not parts.query and parts.path in ("/", ""):
+                continue
+            seen.add(target)
+            label = anchor.get_text(" ", strip=True)
+            if self.is_asset(target):
+                assets.append((target, label))
+            else:
+                metadata.append((target, label))
+        return Page(title, assets, metadata)
+
+
 def _discover_catalogue(site, client, db, seeds, limit=None):
     """Collect only first-level detail links from a bounded seed set."""
     count = processed = 0
@@ -351,6 +589,253 @@ def _discover_catalogue(site, client, db, seeds, limit=None):
             if limit is not None and processed >= limit:
                 return count
     return count
+
+
+class BanglaBookshelf(SitemapAdapter):
+    """Static catalogue adapter for BanglaBookshelf (no sitemap).
+
+    Series/listing pages (``*-books.php``) and detail pages are plain ``.php``
+    documents that link directly to same-host PDFs, so discovery starts from a
+    bounded seed set and the crawl follows ``.php`` links while ``.pdf`` links
+    are queued as assets.
+    """
+
+    name = "banglabookshelf"
+    root = "https://www.banglabookshelf.com/"
+    hosts = {"banglabookshelf.com", "www.banglabookshelf.com"}
+    capability = "direct-assets"
+    status = "enabled"
+    discovery = "catalogue"
+    post_pattern = re.compile(r"/.+\.php", re.I)
+    excluded_prefixes = ("/about-us.php", "/contact-us.php", "/privacy-policy.php", "/index.php",
+                           "/terms-of-use.php", "/terms.php", "/disclaimer.php", "/dmca.php")
+
+    def is_post(self, url):
+        if not self.owns(url):
+            return False
+        path = urlsplit(url).path
+        if path in {"/", ""} or path.lower() in self.excluded_prefixes:
+            return False
+        return bool(re.fullmatch(r"/.+\.php", path, re.I))
+
+    def parse(self, url, html):
+        # Listing pages link to other .php pages with plain labels (series and
+        # author names), so post links must stay in the queue channel instead
+        # of being dropped as non-metadata navigation.
+        soup = BeautifulSoup(html, "html.parser")
+        title = _title(soup, url)
+        assets, metadata, seen = [], [], set()
+        for anchor in _content(soup).select("a[href]"):
+            target = clean_url(url, anchor.get("href", ""))
+            if not target or target == url or target in seen:
+                continue
+            seen.add(target)
+            label = anchor.get_text(" ", strip=True)
+            if self.is_asset(target) or self.is_post(target):
+                assets.append((target, label))
+            elif self._metadata_link(target, label):
+                metadata.append((target, label))
+        return Page(title, assets, metadata)
+
+    def discover_catalogue(self, client, db, limit=None):
+        seeds = (self.root, self.root + "index.php", self.root + "Story-Book.php")
+        return _discover_catalogue(self, client, db, seeds, limit)
+
+
+class WorldMets(WordPressBookSite):
+    name = "worldmets"
+    root = "https://www.worldmets.com/"
+    hosts = {"worldmets.com", "www.worldmets.com"}
+    _SITEMAP_INDEX = root + "sitemap.xml"
+    sitemap_marker = "post-sitemap"
+    post_pattern = re.compile(r"/[^/?#]+/[^/?#]+/?$")
+
+    def is_post(self, url):
+        if not self.owns(url):
+            return False
+        parts = urlsplit(url)
+        # Ignore share/utm variants that repeat the same post.
+        if parts.query:
+            return False
+        segments = [seg for seg in parts.path.split("/") if seg]
+        if not 2 <= len(segments) <= 4 or segments[0] in {"wp-content", "category", "tag", "author"}:
+            return False
+        if any(seg.lower() in {"feed", "page", "comments"} for seg in segments):
+            return False
+        return all(re.fullmatch(r"[a-z0-9][a-z0-9\-.]*", seg, re.I) for seg in segments)
+
+
+def _archive_identifier(url):
+    """Return the archive.org item identifier for a details/stream/download URL."""
+    from urllib.parse import unquote
+
+    parts = urlsplit(url)
+    if (parts.hostname or "").lower() not in {"archive.org", "www.archive.org"}:
+        return None
+    segments = [seg for seg in parts.path.split("/") if seg]
+    if len(segments) >= 2 and segments[0] in {"details", "stream", "download"}:
+        return unquote(segments[1]) or None
+    return None
+
+
+def _archive_ids_in_catalog(db_path):
+    """Collect archive.org identifiers already recorded in another catalogue DB."""
+    import sqlite3
+
+    known = set()
+    try:
+        other = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    except Exception:
+        return known
+    try:
+        tables = {row[0] for row in other.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "pages" in tables:
+            for row in other.execute("SELECT url FROM pages"):
+                identifier = _archive_identifier(row[0] or "")
+                if identifier:
+                    known.add(identifier)
+        for table, column in (("assets", "url"), ("links", "asset_url"), ("metadata_links", "url")):
+            if table in tables:
+                for row in other.execute(f"SELECT {column} FROM {table}"):
+                    identifier = _archive_identifier(row[0] or "")
+                    if identifier:
+                        known.add(identifier)
+    except Exception:
+        pass
+    finally:
+        try:
+            other.close()
+        except Exception:
+            pass
+    return known
+
+
+class ArchiveBengali(SitemapAdapter):
+    """API catalogue adapter for public Bengali texts on archive.org.
+
+    Discovery pages through ``advancedsearch.php`` (``language:ben``,
+    ``mediatype:texts``) and resolves each item's book files through the
+    public metadata API, recording one done page per item
+    (``https://archive.org/details/<identifier>/``) with its
+    ``/download/<identifier>/<file>`` assets.  (Item detail HTML is
+    JS-rendered, so file discovery uses the metadata API instead of parsing.)
+    Derivative bundles (``*_jp2.zip``) stay out of the download queue.
+
+    Identifiers already present in the sibling Granthagara catalogue
+    (``<data-dir>/../granthagara/catalog.sqlite3``) are skipped at discovery
+    so the two runs never download the same books twice.
+    """
+
+    name = "archive_bengali"
+    root = "https://archive.org/"
+    hosts = {"archive.org", "www.archive.org"}
+    capability = "public-domain-api-files"
+    status = "enabled"
+    discovery = "catalogue"
+    dedupe_sites = ("granthagara",)
+    post_pattern = re.compile(r"/details/[^/?#]+/?")
+    _search_template = (
+        "https://archive.org/advancedsearch.php?q=language%3Aben+AND+mediatype%3Atexts"
+        "&fl%5B%5D=identifier&rows=200&page={page}&output=json"
+    )
+
+    def _page_url(self, identifier):
+        return f"{self.root}details/{identifier}/"
+
+    def is_post(self, url):
+        if not self.owns(url):
+            return False
+        return bool(re.fullmatch(r"/details/[^/?#]+/?", urlsplit(url).path))
+
+    def is_asset(self, url):
+        if not self.owns(url):
+            return False
+        path = urlsplit(url).path.lower()
+        if not path.startswith("/download/"):
+            return False
+        if path.endswith("_jp2.zip"):
+            return False
+        return path.endswith(BOOK_EXTENSIONS)
+
+    def _known_identifiers(self, db):
+        from pathlib import Path
+
+        known = set()
+        try:
+            rows = db.execute("SELECT url FROM pages WHERE site=?", (self.name,)).fetchall()
+        except Exception:
+            rows = []
+        for row in rows:
+            identifier = _archive_identifier(row[0] or "")
+            if identifier:
+                known.add(identifier)
+        try:
+            main = db.execute("PRAGMA database_list").fetchall()
+            db_file = next((Path(entry[2]) for entry in main if entry[1] == "main" and entry[2]), None)
+        except Exception:
+            db_file = None
+        if db_file:
+            for site in self.dedupe_sites:
+                known |= _archive_ids_in_catalog(db_file.parent.parent / site / "catalog.sqlite3")
+        return known
+
+    def _book_files(self, identifier, payload):
+        from urllib.parse import quote
+
+        files = []
+        if not isinstance(payload, dict):
+            return files
+        for entry in payload.get("files", []) or []:
+            name = (entry.get("name", "") or "").strip()
+            if not name:
+                continue
+            url = f"{self.root}download/{identifier}/{quote(name)}"
+            if self.is_asset(url):
+                files.append((url, name))
+        return files
+
+    def discover_catalogue(self, client, db, limit=None):
+        known = self._known_identifiers(db)
+        count = processed = page = 0
+        while True:
+            page += 1
+            try:
+                with client.get(self._search_template.format(page=page)) as response:
+                    payload = json.loads(response.text)
+            except Exception:
+                break
+            docs = (payload.get("response", {}) if isinstance(payload, dict) else {}).get("docs", [])
+            if not docs:
+                break
+            for doc in docs:
+                identifier = (doc.get("identifier", "") or "").strip()
+                if not identifier or identifier in known:
+                    continue
+                try:
+                    with client.get(f"{self.root}metadata/{identifier}") as response:
+                        meta = json.loads(response.text)
+                except Exception:
+                    continue
+                title = ((meta.get("metadata", {}) or {}).get("title", "") or "").strip() or identifier
+                if isinstance(title, list):
+                    title = (title[0] if title else identifier).strip() or identifier
+                files = self._book_files(identifier, meta)
+                if not files:
+                    continue
+                page_url = self._page_url(identifier)
+                known.add(identifier)
+                processed += 1
+                with db:
+                    count += db.execute(
+                        "INSERT OR IGNORE INTO pages(site,url,title,status) VALUES (?,?,?,?)",
+                        (self.name, page_url, title, "done"),
+                    ).rowcount
+                    for target, label in files:
+                        db.execute("INSERT OR IGNORE INTO assets(url) VALUES (?)", (target,))
+                        db.execute("INSERT OR REPLACE INTO links VALUES (?,?,?)", (page_url, target, label))
+                if limit is not None and processed >= limit:
+                    return count
+        return count
 
 
 # Friendly aliases for callers that use the source's displayed name.

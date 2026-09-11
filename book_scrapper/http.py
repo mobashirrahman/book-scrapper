@@ -7,9 +7,11 @@ import requests
 
 class Client:
     """Serial, paced requests. Check robots for each origin and redirect."""
-    def __init__(self, delay=2.0, retries=3):
+    def __init__(self, delay=2.0, retries=3, robots_redirect="raise", respect_robots=True):
         self.delay = delay
         self.retries = retries
+        self.respect_robots = respect_robots
+        self.robots_redirect = robots_redirect
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "BookScrapper/0.1"
         self.robots = {}
@@ -36,27 +38,49 @@ class Client:
                 time.sleep(2 ** attempt)
 
     def allowed(self, url):
+        if not self.respect_robots:
+            return True
         p = urlsplit(url)
         origin = f"{p.scheme}://{p.netloc}"
         if origin not in self.robots:
-            r = self._request(origin + "/robots.txt")
-            with r:
-                rules = RobotFileParser()
-                if r.status_code in (404, 410):
-                    rules.parse([])
-                elif r.status_code in (401, 403):
-                    rules.parse(["User-agent: *", "Disallow: /"])
-                else:
-                    r.raise_for_status()
-                    if r.is_redirect:
-                        raise ValueError(f"Robots redirect requires review: {origin}")
-                    rules.parse(r.text.splitlines())
-                self.robots[origin] = rules
+            rules = self._rules(origin)
+            self.robots[origin] = rules
         rules = self.robots[origin]
         crawl_delay = rules.crawl_delay("BookScrapper") or 0
         if crawl_delay:
             self.delay = max(self.delay, crawl_delay)
         return rules.can_fetch("BookScrapper", url)
+
+    def _rules(self, origin):
+        robots_url = origin + "/robots.txt"
+        rules = RobotFileParser()
+        if self.robots_redirect == "follow":
+            for _ in range(5):
+                with self._request(robots_url) as r:
+                    if r.status_code in (404, 410):
+                        rules.parse([])
+                        return rules
+                    if r.is_redirect:
+                        robots_url = urljoin(robots_url, r.headers["Location"])
+                        continue
+                    if r.status_code in (401, 403):
+                        rules.parse(["User-agent: *", "Disallow: /"])
+                        return rules
+                    r.raise_for_status()
+                    rules.parse(r.text.splitlines())
+                    return rules
+            raise ValueError(f"Robots redirect loop for {origin}")
+        with self._request(robots_url) as r:
+            if r.status_code in (404, 410):
+                rules.parse([])
+            elif r.status_code in (401, 403):
+                rules.parse(["User-agent: *", "Disallow: /"])
+            else:
+                r.raise_for_status()
+                if r.is_redirect:
+                    raise ValueError(f"Robots redirect requires review: {origin}")
+                rules.parse(r.text.splitlines())
+            return rules
 
     def get(self, url, stream=False):
         for _ in range(10):
