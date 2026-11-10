@@ -13,6 +13,32 @@ class Unsupported(ValueError):
     pass
 
 
+META_COLUMNS = (
+    ("author", "TEXT"),
+    ("publisher", "TEXT"),
+    ("published_date", "TEXT"),
+    ("language", "TEXT"),
+    ("isbn", "TEXT"),
+    ("page_count", "INTEGER"),
+    ("meta_confidence", "TEXT"),
+    ("meta_source", "TEXT"),
+    ("meta_raw", "TEXT"),
+)
+
+
+def _ensure_meta_columns(db):
+    """Idempotent migration for catalogues created before metadata landed."""
+    try:
+        existing = {row[1] for row in db.execute("PRAGMA table_info(pages)").fetchall()}
+    except Exception:
+        return
+    with db:
+        for name, ddl in META_COLUMNS:
+            if name not in existing:
+                default = " DEFAULT 'low'" if name == "meta_confidence" else ""
+                db.execute(f"ALTER TABLE pages ADD COLUMN {name} {ddl}{default}")
+
+
 def resolve(client, url):
     host = urlsplit(url).hostname or ""
     if host in {"drive.google.com", "docs.google.com"}:
@@ -109,7 +135,11 @@ class Pipeline:
         self.db.executescript('''
         CREATE TABLE IF NOT EXISTS pages (
           site TEXT NOT NULL, url TEXT PRIMARY KEY, title TEXT,
-          status TEXT NOT NULL DEFAULT 'pending', error TEXT);
+          status TEXT NOT NULL DEFAULT 'pending', error TEXT,
+          author TEXT, publisher TEXT, published_date TEXT, language TEXT,
+          isbn TEXT, page_count INTEGER,
+          meta_confidence TEXT NOT NULL DEFAULT 'low', meta_source TEXT,
+          meta_raw TEXT);
         CREATE TABLE IF NOT EXISTS assets (
           url TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending',
           path TEXT, sha256 TEXT, bytes INTEGER, error TEXT);
@@ -119,7 +149,10 @@ class Pipeline:
         CREATE TABLE IF NOT EXISTS metadata_links (
           page_url TEXT, url TEXT, label TEXT,
           PRIMARY KEY(page_url, url));
+        CREATE TABLE IF NOT EXISTS authority_cache (
+          key TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT);
         ''')
+        _ensure_meta_columns(self.db)
 
     def discover(self):
         if getattr(self.site, "discovery", "sitemap") == "catalogue":
@@ -163,13 +196,84 @@ class Pipeline:
                             self.db.execute("INSERT OR REPLACE INTO links VALUES (?,?,?)", (url, target, label))
                     for target, label in getattr(page, "metadata_links", []):
                         self.db.execute("INSERT OR REPLACE INTO metadata_links VALUES (?,?,?)", (url, target, label))
-                    self.db.execute("UPDATE pages SET title=?,status='done',error=NULL WHERE url=?", (page.title, url))
+                    meta = getattr(page, "meta", None)
+                    if meta is not None:
+                        import json as _json
+
+                        self.db.execute(
+                            "UPDATE pages SET title=?,author=?,publisher=?,published_date=?,"
+                            "language=?,isbn=?,page_count=?,meta_confidence=?,meta_source=?,"
+                            "meta_raw=?,status='done',error=NULL WHERE url=?",
+                            (page.title, meta.author, meta.publisher, meta.published_date,
+                             meta.language, meta.isbn, meta.page_count, meta.confidence,
+                             meta.source, _json.dumps(meta.raw, ensure_ascii=False) if meta.raw else None, url),
+                        )
+                    else:
+                        self.db.execute("UPDATE pages SET title=?,status='done',error=NULL WHERE url=?", (page.title, url))
                 print(f"Indexed: {page.title}", flush=True)
             except Exception as exc:
                 with self.db:
                     self.db.execute("UPDATE pages SET status='failed',error=? WHERE url=?", (str(exc), url))
                 print(f"Failed page: {url}: {exc}", flush=True)
         return len(rows)
+
+    def enrich(self, limit=None, retry=False):
+        """Resolve scraped metadata against authority APIs (Open Library etc).
+
+        Only fills gaps: ISBN-exact or dual-authority agreement upgrades a
+        page to high confidence; disagreements keep the scraped value and
+        stay low. All lookups are cached in ``authority_cache``.
+        """
+        from .resolve import enrich_metadata
+        from .site_utils import BookMeta
+
+        if retry:
+            rows = self.db.execute(
+                "SELECT url,title,author,publisher,published_date,language,isbn,page_count,"
+                "meta_confidence,meta_source,meta_raw FROM pages WHERE site=? AND status='done'"
+                " ORDER BY url DESC LIMIT ?",
+                (self.site.name, limit if limit is not None else -1),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT url,title,author,publisher,published_date,language,isbn,page_count,"
+                "meta_confidence,meta_source,meta_raw FROM pages WHERE site=? AND status='done'"
+                " AND (author IS NULL AND isbn IS NULL) ORDER BY url DESC LIMIT ?",
+                (self.site.name, limit if limit is not None else -1),
+            ).fetchall()
+        import json as _json
+
+        done = 0
+        for row in rows:
+            try:
+                raw = _json.loads(row["meta_raw"]) if row["meta_raw"] else {}
+            except Exception:
+                raw = {}
+            base = BookMeta(
+                author=row["author"], publisher=row["publisher"],
+                published_date=row["published_date"], language=row["language"],
+                isbn=row["isbn"], page_count=row["page_count"],
+                confidence=row["meta_confidence"] or "low",
+                source=row["meta_source"], raw=raw if isinstance(raw, dict) else {},
+            )
+            try:
+                enriched, source = enrich_metadata(base, row["title"] or "", self.client, self.db)
+            except Exception as exc:
+                print(f"Enrich failed: {row['url']}: {exc}", flush=True)
+                continue
+            with self.db:
+                self.db.execute(
+                    "UPDATE pages SET author=?,publisher=?,published_date=?,language=?,isbn=?,"
+                    "page_count=?,meta_confidence=?,meta_source=?,meta_raw=? WHERE url=?",
+                    (enriched.author, enriched.publisher, enriched.published_date,
+                     enriched.language, enriched.isbn, enriched.page_count,
+                     enriched.confidence, enriched.source,
+                     _json.dumps(enriched.raw, ensure_ascii=False) if enriched.raw else None,
+                     row["url"]),
+                )
+            done += 1
+            print(f"Enriched: {row['url']} [{enriched.confidence}/{enriched.source}]", flush=True)
+        return done
 
     def download(self, limit=None, retry=False, max_bytes=512 * 1024 * 1024):
         statuses = ("pending", "failed", "unsupported") if retry else ("pending",)
@@ -233,7 +337,14 @@ class Pipeline:
     def status(self):
         pages = dict(self.db.execute("SELECT status,count(*) FROM pages WHERE site=? GROUP BY status", (self.site.name,)))
         assets = dict(self.db.execute("SELECT a.status,count(DISTINCT a.url) FROM assets a JOIN links l ON a.url=l.asset_url JOIN pages p ON p.url=l.page_url WHERE p.site=? GROUP BY a.status", (self.site.name,)))
-        return {"site": self.site.name, "pages": pages, "assets": assets}
+        try:
+            meta = dict(self.db.execute("SELECT meta_confidence,count(*) FROM pages WHERE site=? AND status='done' GROUP BY meta_confidence", (self.site.name,)))
+        except Exception:
+            meta = {}
+        result = {"site": self.site.name, "pages": pages, "assets": assets}
+        if meta:
+            result["meta"] = meta
+        return result
 
     def export(self, path):
         with Path(path).open("w", encoding="utf-8") as out:

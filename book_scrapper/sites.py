@@ -3,7 +3,7 @@ from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 
 from bs4 import BeautifulSoup
-from .site_utils import Page, clean_url
+from .site_utils import Page, clean_url, extract_meta
 
 
 class Amarboi:
@@ -36,14 +36,18 @@ class Amarboi:
             target = clean_url(url, raw)
             if target and target != url:
                 links[target] = tag.get_text(" ", strip=True)
-        return Page(title.get_text(" ", strip=True) if title else url, list(links.items()))
+        try:
+            meta = extract_meta(html, url)
+        except Exception:
+            meta = None
+        return Page(title.get_text(" ", strip=True) if title else url, list(links.items()), [], meta)
 
 
 from .sources import (
-    AllBanglaBoi, ArchiveBengali, BDeBooks, BanglaBook, BanglaBookshelf,
-    BanglaBooksIn, BnWikisource, Granthagara, BengaliOnline, FID4SA,
-    DPLELibrary, Boiprakash, Nctb, PdfPoro, Boighor, ProjectGutenberg, NDLI,
-    KindleBangla, LiberationWarBangladesh, WorldMets,
+    ArefinLibrary, AllBanglaBoi, ArchiveBengali, BDeBooks, BanglaBook, BanglaBookshelf,
+    BanglaBooksIn, BengaliEbook, BengaliOnline, BnWikisource, Granthagara,
+    FID4SA, DPLELibrary, Boiprakash, Nctb, PdfPoro, Boighor, ProjectGutenberg,
+    NDLI, KindleBangla, LiberationWarBangladesh, WorldMets,
 )
 Bdebooks = BDeBooks
 Banglabook = BanglaBook
@@ -59,8 +63,9 @@ ProjectGutenbergBengali = Gutenberg = ProjectGutenberg
 Ndli = NDLI
 Liberationwarbangladesh = LiberationWarBangladesh
 
-for _adapter in (Amarboi, BDeBooks, BanglaBook, AllBanglaBoi, BanglaBooksIn,
+for _adapter in (Amarboi, ArefinLibrary, BDeBooks, BanglaBook, AllBanglaBoi, BanglaBooksIn,
                   BanglaBookshelf, WorldMets, ArchiveBengali, BnWikisource, Nctb,
+                  BengaliEbook,
                   Granthagara, BengaliOnline, FID4SA, DPLELibrary, Boiprakash,
                   PdfPoro, Boighor, ProjectGutenberg, NDLI, KindleBangla,
                   LiberationWarBangladesh):
@@ -68,8 +73,8 @@ for _adapter in (Amarboi, BDeBooks, BanglaBook, AllBanglaBoi, BanglaBooksIn,
     _adapter.adapter_status = property(lambda self: getattr(self, "status", "enabled"))
 
 SITES = {adapter().name: adapter() for adapter in (
-    Amarboi, BDeBooks, Granthagara, BengaliOnline, FID4SA, DPLELibrary,
+    Amarboi, ArefinLibrary, BDeBooks, Granthagara, BengaliOnline, FID4SA, DPLELibrary,
     Boiprakash, PdfPoro, Boighor, ProjectGutenberg, NDLI, KindleBangla,
     BanglaBook, AllBanglaBoi, BanglaBooksIn, BanglaBookshelf, WorldMets,
-    ArchiveBengali, BnWikisource, Nctb, LiberationWarBangladesh,
+    ArchiveBengali, BnWikisource, Nctb, BengaliEbook, LiberationWarBangladesh,
 )}

@@ -33,13 +33,14 @@ Global flags (apply to every command):
 - `--ignore-robots` — skip `robots.txt` checks (only for sites you have
   explicit permission to crawl).
 
-## Supported sites (22)
+## Supported sites (23)
 
 `--site` choices from `book-scrapper --help`:
 
 | `--site` | Root | Discovery (`discover`) | `crawl` records | `download` / `fetch` |
 |---|---|---|---|---|
 | `amarboi` | https://www.amarboi.com/ | sitemap | catalogue pages + file/access links | public file candidates |
+| `arefinlibrary` | https://www.arefinlibrary.com/ | sitemap (`books-sitemap`) | `/books/<slug>/` pages | same-host `/pdf/<slug>` endpoints queued as assets |
 | `bdebooks` | https://bdebooks.com/bn/ | sitemap | catalogue pages + same-host PDFs/EPUBs | direct files; `/dl/`, `/esdl/`, … handlers stay metadata (robots-disallowed) |
 | `granthagara` | https://granthagara.com/ | sitemap (`boi-sitemap`) | book pages | direct files (incl. archive.org mirrors) |
 | `bengalionline` | https://isid.ac.in/~deepayan/bengalionline.net/ | sitemap | static `.html` pages | public-domain PDF/EPUB/ZIP under the collection path |
@@ -107,7 +108,7 @@ There is no `--site all`; loop over the site names with a separate
 `--data-dir` per site:
 
 ```bash
-for SITE in allbanglaboi amarboi archive_bengali banglabook banglabooks_in \
+for SITE in allbanglaboi amarboi archive_bengali arefinlibrary banglabook banglabooks_in \
     banglabookshelf bdebooks bengaliebook bengalionline bn_wikisource boighor \
     boiprakash dpl_elibrary fid4sa granthagara gutenberg_bengali kindlebangla \
     liberationwarbangladesh nctb ndli pdfporo worldmets; do

@@ -13,7 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
-from .site_utils import Page, clean_url
+from .site_utils import Page, clean_url, extract_meta
 
 
 BOOK_EXTENSIONS = (".pdf", ".epub", ".zip", ".rar", ".mobi", ".fb2", ".7z")
@@ -35,6 +35,34 @@ def _locs(xml):
 def _title(soup, url):
     element = soup.select_one("h1.entry-title, h1.page-header-title, h1, title")
     return element.get_text(" ", strip=True) if element else url
+
+
+def _first_str(value):
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+        return None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _ensure_pages_meta(db):
+    """Add metadata columns to caller-owned catalogue DBs (tests, old runs)."""
+    try:
+        existing = {row[1] for row in db.execute("PRAGMA table_info(pages)").fetchall()}
+    except Exception:
+        return
+    for column in ("author", "publisher", "published_date", "language",
+                   "isbn", "page_count", "meta_confidence", "meta_source", "meta_raw"):
+        if column not in existing:
+            column_type = "INTEGER" if column == "page_count" else "TEXT"
+            try:
+                with db:
+                    db.execute(f"ALTER TABLE pages ADD COLUMN {column} {column_type}")
+            except Exception:
+                pass
 
 
 def _content(soup):
@@ -92,7 +120,11 @@ class SitemapAdapter:
                 assets.append((target, label))
             elif self._metadata_link(target, label) or self.capability == "metadata-only":
                 metadata.append((target, label))
-        return Page(title, assets, metadata)
+        try:
+            meta = extract_meta(html, url)
+        except Exception:
+            meta = None
+        return Page(title, assets, metadata, meta)
 
 
 class BDeBooks(SitemapAdapter):
@@ -562,7 +594,11 @@ class LiberationWarBangladesh(SitemapAdapter):
                 assets.append((target, label))
             else:
                 metadata.append((target, label))
-        return Page(title, assets, metadata)
+        try:
+            meta = extract_meta(html, url)
+        except Exception:
+            meta = None
+        return Page(title, assets, metadata, meta)
 
 
 def _discover_catalogue(site, client, db, seeds, limit=None):
@@ -635,7 +671,11 @@ class BanglaBookshelf(SitemapAdapter):
                 assets.append((target, label))
             elif self._metadata_link(target, label):
                 metadata.append((target, label))
-        return Page(title, assets, metadata)
+        try:
+            meta = extract_meta(html, url)
+        except Exception:
+            meta = None
+        return Page(title, assets, metadata, meta)
 
     def discover_catalogue(self, client, db, limit=None):
         seeds = (self.root, self.root + "index.php", self.root + "Story-Book.php")
@@ -795,6 +835,7 @@ class ArchiveBengali(SitemapAdapter):
         return files
 
     def discover_catalogue(self, client, db, limit=None):
+        _ensure_pages_meta(db)
         known = self._known_identifiers(db)
         count = processed = page = 0
         while True:
@@ -825,10 +866,24 @@ class ArchiveBengali(SitemapAdapter):
                 page_url = self._page_url(identifier)
                 known.add(identifier)
                 processed += 1
+                info = meta.get("metadata", {}) or {}
+                author = _first_str(info.get("creator"))
+                publisher = _first_str(info.get("publisher"))
+                date = _first_str(info.get("date"))
+                language = _first_str(info.get("language"))
+                try:
+                    from .site_utils import normalize_date, normalize_language
+
+                    date = normalize_date(date)
+                    language = normalize_language(language)
+                except Exception:
+                    pass
                 with db:
                     count += db.execute(
-                        "INSERT OR IGNORE INTO pages(site,url,title,status) VALUES (?,?,?,?)",
-                        (self.name, page_url, title, "done"),
+                        "INSERT OR IGNORE INTO pages(site,url,title,status,author,publisher,"
+                        "published_date,language,meta_confidence,meta_source) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (self.name, page_url, title, "done", author, publisher,
+                         date, language, "high", "archive.org"),
                     ).rowcount
                     for target, label in files:
                         db.execute("INSERT OR IGNORE INTO assets(url) VALUES (?)", (target,))
@@ -897,6 +952,7 @@ class BnWikisource(SitemapAdapter):
     def discover_catalogue(self, client, db, limit=None):
         count = processed = 0
         cont = ""
+        _ensure_pages_meta(db)
         while True:
             try:
                 with client.get(self._api_template.format(cont=cont)) as response:
@@ -916,8 +972,8 @@ class BnWikisource(SitemapAdapter):
                 processed += 1
                 with db:
                     count += db.execute(
-                        "INSERT OR IGNORE INTO pages(site,url,title,status) VALUES (?,?,?,?)",
-                        (self.name, page_url, title, "done"),
+                        "INSERT OR IGNORE INTO pages(site,url,title,status,language,meta_confidence,meta_source) VALUES (?,?,?,?,?,?,?)",
+                        (self.name, page_url, title, "done", "ben", "high", "wikisource-api"),
                     ).rowcount
                     db.execute("INSERT OR IGNORE INTO assets(url) VALUES (?)", (target,))
                     db.execute("INSERT OR REPLACE INTO links VALUES (?,?,?)", (page_url, target, title))
@@ -981,10 +1037,75 @@ class Nctb(WordPressBookSite):
                 assets.append((target, label))
             elif self._metadata_link(target, label):
                 metadata.append((target, label))
-        return Page(title, assets, metadata)
+        try:
+            meta = extract_meta(html, url)
+        except Exception:
+            meta = None
+        return Page(title, assets, metadata, meta)
 
     def discover_catalogue(self, client, db, limit=None):
         return _discover_catalogue(self, client, db, (self.root, self.root + "textbooks/"), limit)
+
+
+class BengaliEbook(SitemapAdapter):
+    """Sitemap adapter for BengaliEbook (direct same-host PDFs).
+
+    Book posts live at single-segment slugs (Bengali or transliterated) as
+    listed in the RankMath ``post-sitemap`` shards; each post links directly
+    to a ``wp-content/uploads/...pdf`` file, so the base owned-file asset
+    rule applies with no third-party resolver.
+    """
+
+    name = "bengaliebook"
+    root = "https://bengaliebook.com/"
+    hosts = {"bengaliebook.com", "www.bengaliebook.com"}
+    _SITEMAP_INDEX = root + "sitemap.xml"
+    sitemap_marker = "post-sitemap"
+    post_pattern = re.compile(r"/[^/?#]+/?$")
+    excluded_prefixes = ("/about-us/", "/contact-us/", "/privacy-policy/", "/disclaimer/")
+
+    def is_post(self, url):
+        if not self.owns(url):
+            return False
+        path = urlsplit(url).path
+        if path in {"/", ""} or path.lower() in self.excluded_prefixes:
+            return False
+        return bool(re.fullmatch(r"/[^/?#]+/?", path))
+
+
+class ArefinLibrary(SitemapAdapter):
+    """Sitemap adapter for Arefin Library (WordPress + RankMath sitemaps).
+
+    Book pages live at ``/books/<slug>/`` as listed in the RankMath
+    ``books-sitemap<N>.xml`` shards (genre/writer/chapter/page shards are
+    ignored). Each book page has a same-host ``/pdf/<slug>`` download
+    endpoint that serves or redirects to the book PDF, so it is queued as
+    an asset; genre/writer/listing links stay metadata.
+    """
+
+    name = "arefinlibrary"
+    root = "https://www.arefinlibrary.com/"
+    hosts = {"arefinlibrary.com", "www.arefinlibrary.com"}
+    _SITEMAP_INDEX = root + "sitemap.xml"
+    sitemap_marker = "books-sitemap"
+    post_pattern = re.compile(r"/books/[^/?#]+/?")
+    excluded_prefixes = ("/books/",)
+
+    def is_post(self, url):
+        if not self.owns(url):
+            return False
+        path = urlsplit(url).path
+        if path in {"/", "", "/books", "/books/"}:
+            return False
+        return bool(re.fullmatch(r"/books/[^/?#]+/?", path))
+
+    def is_asset(self, url):
+        if not self.owns(url):
+            return False
+        path = urlsplit(url).path
+        if path.startswith("/pdf/"):
+            return True
+        return path.lower().endswith(BOOK_EXTENSIONS)
 
 
 # Friendly aliases for callers that use the source's displayed name.

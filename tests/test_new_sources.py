@@ -4,6 +4,7 @@ import pytest
 
 from book_scrapper.pipeline import Pipeline
 from book_scrapper.sites import (
+    ArefinLibrary,
     AllBanglaBoi,
     ArchiveBengali,
     BDeBooks,
@@ -52,7 +53,7 @@ class Client:
 
 
 @pytest.mark.parametrize("name", [
-    "bdebooks", "granthagara", "bengalionline", "fid4sa", "dpl_elibrary",
+    "arefinlibrary", "bdebooks", "granthagara", "bengalionline", "fid4sa", "dpl_elibrary",
     "boiprakash", "pdfporo", "boighor", "gutenberg_bengali", "ndli",
     "kindlebangla", "liberationwarbangladesh", "banglabook", "allbanglaboi",
     "banglabooks_in", "banglabookshelf", "worldmets", "archive_bengali",
@@ -893,3 +894,47 @@ def test_nctb_parse_queues_drive_assets():
     )
     assert [url for url, _ in page.links] == ["https://drive.google.com/uc?export=download&id=abc"]
     assert [url for url, _ in page.metadata_links] == ["https://viewer.example/record/1"]
+
+
+def test_arefinlibrary_posts_and_pdf_handler():
+    site = ArefinLibrary()
+    assert site.is_post("https://www.arefinlibrary.com/books/chotoder-joto-lekha-by-humayun-ahmed/")
+    assert not site.is_post("https://www.arefinlibrary.com/books")
+    assert not site.is_post("https://www.arefinlibrary.com/books/")
+    assert not site.is_post("https://www.arefinlibrary.com/genre/childrens-book/")
+    assert not site.is_post("https://www.arefinlibrary.com/writer/humayun-ahmed/")
+    assert not site.is_post("https://www.arefinlibrary.com/pdf/chotoder-joto-lekha-by-humayun-ahmed")
+    assert site.is_asset("https://www.arefinlibrary.com/pdf/chotoder-joto-lekha-by-humayun-ahmed")
+    assert site.is_asset("https://www.arefinlibrary.com/wp-content/uploads/2025/01/sample.pdf")
+    assert not site.is_asset("https://www.arefinlibrary.com/books/chotoder-joto-lekha-by-humayun-ahmed/")
+    assert not site.is_asset("https://cdn.example/book.pdf")
+
+
+def test_arefinlibrary_sitemap_keeps_only_book_shards():
+    site = ArefinLibrary()
+    xml = '''<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+        <sitemap><loc>https://www.arefinlibrary.com/books-sitemap1.xml</loc></sitemap>
+        <sitemap><loc>https://www.arefinlibrary.com/books-sitemap14.xml</loc></sitemap>
+        <sitemap><loc>https://www.arefinlibrary.com/page-sitemap.xml</loc></sitemap>
+        <sitemap><loc>https://www.arefinlibrary.com/chapter-sitemap.xml</loc></sitemap>
+        <sitemap><loc>https://www.arefinlibrary.com/genre-sitemap.xml</loc></sitemap>
+        <sitemap><loc>https://www.arefinlibrary.com/writer-sitemap1.xml</loc></sitemap>
+    </sitemapindex>'''
+    assert site.sitemap(xml.encode()) == (True, [
+        "https://www.arefinlibrary.com/books-sitemap1.xml",
+        "https://www.arefinlibrary.com/books-sitemap14.xml",
+    ])
+
+
+def test_arefinlibrary_parse_queues_pdf_handler():
+    site = ArefinLibrary()
+    post = "https://www.arefinlibrary.com/books/chotoder-joto-lekha-by-humayun-ahmed/"
+    page = site.parse(
+        post,
+        '<article><h1>Chotoder Joto Lekha</h1>'
+        '<a href="/pdf/chotoder-joto-lekha-by-humayun-ahmed">Download PDF</a>'
+        '<a href="/books/ajob-bagher-ajgubi-by-sailen-ghosh/">Ajob Bagher Ajgubi</a>'
+        '<a href="/genre/childrens-book/">Children\'s Book</a></article>',
+    )
+    assert [url for url, _ in page.links] == ["https://www.arefinlibrary.com/pdf/chotoder-joto-lekha-by-humayun-ahmed"]
+    assert [url for url, _ in page.metadata_links] == []

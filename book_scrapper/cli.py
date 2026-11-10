@@ -15,7 +15,7 @@ from .sites import SITES
 def data_dir_lock(data_dir, command):
     """Prevent concurrent writers on the same data-dir.
 
-    discover/crawl/download take an exclusive lock; status/export are
+    discover/crawl/download/enrich take an exclusive lock; status/export are
     read-only and run lock-free so they work alongside a download
     (SQLite WAL gives them a consistent snapshot).
     """
@@ -60,8 +60,8 @@ def main():
     parser.add_argument("--ignore-robots", action="store_true", help="Do not check robots.txt (user-opted crawl)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("discover", help="Enumerate all sitemap pages")
-    for name in ("crawl", "download"):
-        command = sub.add_parser(name)
+    for name in ("crawl", "download", "enrich"):
+        command = sub.add_parser(name, help="Resolve scraped metadata against authority APIs" if name == "enrich" else None)
         command.add_argument("--limit", type=int, help="Maximum items this run; default all queued items")
         command.add_argument("--retry", action="store_true", help="Include previously failed items")
         if name == "download":
@@ -123,6 +123,8 @@ def main():
                         pass
             elif args.command == "download":
                 pipeline.download(args.limit, args.retry, args.max_mb * 1024 * 1024)
+            elif args.command == "enrich":
+                print(f"Enriched: {pipeline.enrich(args.limit, args.retry)}")
             elif args.command == "export":
                 pipeline.export(args.path)
             elif args.command == "fetch":
