@@ -74,6 +74,7 @@ Notes:
   Without a key they are recorded as `unsupported`, never bypassed. A Drive
   API 403 automatically retries once via the direct `uc?export=download` URL.
 - MEGA links need the optional extra: `pip install -e '.[mega]'`.
+- Telegram channels need the optional extra: `pip install -e '.[telegram]'`.
 - `download` validates the file signature before saving (PDF/EPUB/ZIP/RAR/
   MOBI/FB2/7z; EPUB is confirmed after the ZIP download via its `mimetype`
   entry) and enforces a `--max-mb` limit (default 512 MiB).
@@ -171,6 +172,41 @@ book-scrapper --site amarboi --data-dir data/amarboi download                 # 
 book-scrapper --site amarboi --data-dir data/amarboi download --retry        # include failed + unsupported too
 book-scrapper --site amarboi --data-dir data/amarboi download --max-mb 100   # per-file cap (default 512)
 ```
+
+### Telegram channels (`book_scrapper.telegram_dl`)
+
+Telegram documents are not reachable over plain HTTP (the public `t.me/s/`
+preview renders only recent posts and never exposes file URLs), so channel
+books are downloaded with the MTProto API through the optional Telethon
+extra, using your own Telegram account. Only download content you have the
+right to keep; the session file counts as a personal credential and stays out
+of version control (`*.session` is git-ignored).
+
+One-time setup:
+
+1. Get free API credentials at <https://my.telegram.org> → *API development
+   tools* → create an app (any title), then either
+   `export TG_API_ID=123456 TG_API_HASH=0123abcd…` or save them to
+   `~/.config/book-scrapper/telegram_api_id` / `telegram_api_hash`.
+2. `pip install -e '.[telegram]'`
+
+Run (the first run prompts for the phone number and the login code Telegram
+sends to your app; later runs reuse the saved session):
+
+```bash
+python -m book_scrapper.telegram_dl --channel bongboi --data-dir data/telegram
+python -m book_scrapper.telegram_dl --channel bongboi --dry-run   # catalogue only
+python -m book_scrapper.telegram_dl --channel bongboi --retry     # redo failed
+python -m book_scrapper.telegram_dl --channel bongboi --ext epub  # single type
+```
+
+Books go to `data/telegram/<channel>/books/` with a `manifest.json` recording
+message id, caption, size, status and path for every book document seen.
+Runs are resumable: re-running skips completed downloads, `--retry` redoes
+failed ones, `--dry-run` records pending entries without downloading.
+Default extensions are `epub pdf mobi azw3`; `--max-mb` (default 512) caps
+per-file size; `--limit` bounds one run. Interrupted runs resume with the
+same command.
 
 ## Development
 

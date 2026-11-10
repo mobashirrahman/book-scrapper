@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
 mega = ["mega.py==1.0.8"]
+telegram = ["telethon>=1.36,<2"]
 
 [project.scripts]
 book-scrapper = "book_scrapper.cli:main"
