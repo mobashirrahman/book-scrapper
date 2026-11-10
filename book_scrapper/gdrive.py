@@ -10,11 +10,13 @@ Deliberate limits (mirroring ``mega.py``):
   scraped, and private or restricted items are never attempted.
 * Public folders need only a browser API key (Drive API enabled): export
   ``GOOGLE_DRIVE_API_KEY``. No OAuth credentials are handled here.
-* A folder's EPUB is picked first (covers/images are never candidates);
-  other book files are only a fallback when no EPUB is present.
-  Empty folders and folders with several same-priority files raise
-  ``Unsupported`` so the pipeline records them instead of guessing —
-  those need a human pick.
+* KindleBangla folders bundle the book with EPUB support files (``.opf``,
+  ``.jpg`` cover, ``.kfx``) and sometimes a PDF/EPUB pair, so nested
+  subfolders are walked and only real book files are candidates. The
+  highest-priority format wins (EPUB > PDF > MOBI > AZW3 > FB2 > archives);
+  within one format the largest file wins, which skips samples and
+  duplicate exports. Empty folders (no book file at any depth) still raise
+  ``Unsupported``.
 * Without an API key (or the optional google client) every folder resolves
   to ``Unsupported`` with a message saying what to set, so plain crawls keep
   working and ``--retry`` picks the folders up once a key is configured.
@@ -30,6 +32,13 @@ from .pipeline import Unsupported
 DRIVE_HOSTS = frozenset({"drive.google.com", "docs.google.com"})
 
 BOOK_EXTENSIONS = (".pdf", ".epub", ".zip", ".rar", ".mobi", ".fb2", ".7z")
+
+# Preferred order when a folder ships several formats of the same book
+# (KindleBangla often has EPUB + PDF or EPUB + KFX).
+BOOK_PRIORITY = (".epub", ".pdf", ".mobi", ".azw3", ".fb2", ".zip", ".rar", ".7z")
+
+FOLDER_MIME = "application/vnd.google-apps.folder"
+MAX_FOLDER_DEPTH = 3
 
 _FOLDER_RE = re.compile(r"/drive/folders/([^/?#]+)")
 _FILE_RE = re.compile(r"/d/([^/]+)")
@@ -106,6 +115,46 @@ def _default_service_factory(api_key):
     return build("drive", "v3", developerKey=api_key)
 
 
+def _list_children(service, folder_id):
+    response = (
+        service.files()
+        .list(
+            q=f"'{folder_id}' in parents and trashed = false",
+            fields="files(id, name, mimeType, size)",
+            pageSize=200,
+        )
+        .execute()
+    )
+    return response.get("files", [])
+
+
+def _book_candidates(service, folder_id, depth=0, seen=None):
+    """Collect book files in a folder, descending into subfolders.
+
+    Covers, ``.opf``/``.xml`` sidecars and other support files never match
+    ``BOOK_PRIORITY``; ``seen`` guards against folder cycles.
+    """
+    seen = seen if seen is not None else set()
+    if folder_id in seen or depth > MAX_FOLDER_DEPTH:
+        return []
+    seen.add(folder_id)
+    candidates = []
+    for entry in _list_children(service, folder_id):
+        name = entry.get("name") or ""
+        if entry.get("mimeType") == FOLDER_MIME:
+            candidates.extend(_book_candidates(service, entry["id"], depth + 1, seen))
+            continue
+        suffix = Path(name).suffix.lower()
+        if suffix not in BOOK_PRIORITY:
+            continue
+        try:
+            size = int(entry.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        candidates.append((BOOK_PRIORITY.index(suffix), -size, name, entry["id"]))
+    return candidates
+
+
 def resolve_folder_file(folder_id, api_key=None, service_factory=None):
     """Resolve a public Drive folder to one direct download URL.
 
@@ -121,15 +170,7 @@ def resolve_folder_file(folder_id, api_key=None, service_factory=None):
         )
     try:
         service = service_factory(key) if service_factory else _default_service_factory(key)
-        response = (
-            service.files()
-            .list(
-                q=f"'{folder_id}' in parents and trashed = false",
-                fields="files(id, name, mimeType)",
-                pageSize=100,
-            )
-            .execute()
-        )
+        candidates = _book_candidates(service, folder_id)
     except Unsupported:
         raise
     except Exception as exc:
@@ -137,25 +178,8 @@ def resolve_folder_file(folder_id, api_key=None, service_factory=None):
         if status in (403, 404):
             raise Unsupported(f"Drive folder is not publicly shared: {folder_id}") from exc
         raise DriveError(f"Drive API error for folder {folder_id}: {exc}") from exc
-    entries = response.get("files", [])
-    # Images/covers (jpg/png/...) and anything else non-book is never a
-    # candidate. EPUB wins; other book files are only a fallback.
-    epubs = [e for e in entries if (e.get("name") or "").lower().endswith(".epub")]
-    others = [
-        e for e in entries
-        if (e.get("name") or "").lower().endswith(BOOK_EXTENSIONS)
-        and not (e.get("name") or "").lower().endswith(".epub")
-    ]
-    if len(epubs) > 1:
-        raise Unsupported(
-            f"Drive folder has {len(epubs)} EPUB files and needs a human pick: {folder_id}"
-        )
-    if len(epubs) == 1:
-        return media_url(epubs[0]["id"], key)
-    if not others:
+    if not candidates:
         raise Unsupported(f"Drive folder has no public book files: {folder_id}")
-    if len(others) > 1:
-        raise Unsupported(
-            f"Drive folder has {len(others)} book files (no EPUB) and needs a human pick: {folder_id}"
-        )
-    return media_url(others[0]["id"], key)
+    # Priority first (EPUB wins), then largest file (skips samples/dupes).
+    _, _, _, file_id = min(candidates)
+    return media_url(file_id, key)

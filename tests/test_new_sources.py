@@ -1,4 +1,5 @@
 import sqlite3
+import re
 
 import pytest
 
@@ -198,6 +199,9 @@ class _DriveFiles:
 
     def list(self, **kwargs):
         entries = self.entries
+        if isinstance(entries, dict):
+            match = re.match(r"'([^']+)' in parents", kwargs.get("q", ""))
+            entries = entries.get(match.group(1) if match else None, [])
 
         class _Execute:
             def execute(self):
@@ -276,7 +280,7 @@ def test_gdrive_epub_wins_over_pdf_and_images(monkeypatch):
     assert resolve_folder_file("folder", service_factory=factory) == "https://www.googleapis.com/drive/v3/files/epub?key=test-key&alt=media"
 
 
-def test_gdrive_empty_and_ambiguous_folders_are_unsupported(monkeypatch):
+def test_gdrive_empty_folders_are_unsupported(monkeypatch):
     from book_scrapper.gdrive import resolve_folder_file
     from book_scrapper.pipeline import Unsupported
 
@@ -285,21 +289,53 @@ def test_gdrive_empty_and_ambiguous_folders_are_unsupported(monkeypatch):
         resolve_folder_file("empty", service_factory=lambda key: _DriveService([]))
     with pytest.raises(Unsupported, match="no public book files"):
         resolve_folder_file(
-            "images-only",
-            service_factory=lambda key: _DriveService([{"id": "c", "name": "cover.jpg", "mimeType": "image/jpeg"}]),
+            "support-files-only",
+            service_factory=lambda key: _DriveService([
+                {"id": "c", "name": "cover.jpg", "mimeType": "image/jpeg"},
+                {"id": "o", "name": "book.opf", "mimeType": "text/xml"},
+                {"id": "k", "name": "book.kfx", "mimeType": "application/octet-stream"},
+            ]),
         )
-    multi_epub = _DriveService([
-        {"id": "a", "name": "one.epub", "mimeType": "application/epub+zip"},
-        {"id": "b", "name": "two.epub", "mimeType": "application/epub+zip"},
+
+
+def test_gdrive_picks_best_format_and_largest_duplicate(monkeypatch):
+    from book_scrapper.gdrive import resolve_folder_file
+
+    monkeypatch.setenv("GOOGLE_DRIVE_API_KEY", "test-key")
+    factory = lambda key: _DriveService([
+        {"id": "epub-small", "name": "book.epub", "mimeType": "application/epub+zip", "size": "100"},
+        {"id": "epub-big", "name": "book (1).epub", "mimeType": "application/epub+zip", "size": "500"},
+        {"id": "pdf", "name": "book.pdf", "mimeType": "application/pdf", "size": "900"},
     ])
-    with pytest.raises(Unsupported, match="human pick"):
-        resolve_folder_file("multi-epub", service_factory=lambda key: multi_epub)
-    multi_other = _DriveService([
-        {"id": "a", "name": "one.pdf", "mimeType": "application/pdf"},
-        {"id": "b", "name": "two.pdf", "mimeType": "application/pdf"},
+    assert resolve_folder_file("multi-epub", service_factory=factory) == (
+        "https://www.googleapis.com/drive/v3/files/epub-big?key=test-key&alt=media"
+    )
+    multi_pdf = _DriveService([
+        {"id": "a", "name": "one.pdf", "mimeType": "application/pdf", "size": "120"},
+        {"id": "b", "name": "two.pdf", "mimeType": "application/pdf", "size": "340"},
     ])
-    with pytest.raises(Unsupported, match="human pick"):
-        resolve_folder_file("multi-pdf", service_factory=lambda key: multi_other)
+    assert resolve_folder_file("multi-pdf", service_factory=lambda key: multi_pdf) == (
+        "https://www.googleapis.com/drive/v3/files/b?key=test-key&alt=media"
+    )
+
+
+def test_gdrive_walks_nested_book_subfolder(monkeypatch):
+    from book_scrapper.gdrive import resolve_folder_file
+
+    monkeypatch.setenv("GOOGLE_DRIVE_API_KEY", "test-key")
+    folders = {
+        "root": [
+            {"id": "sub", "name": "Book", "mimeType": "application/vnd.google-apps.folder"},
+            {"id": "cover", "name": "cover.jpg", "mimeType": "image/jpeg"},
+        ],
+        "sub": [
+            {"id": "epub", "name": "book.epub", "mimeType": "application/epub+zip", "size": "10"},
+            {"id": "opf", "name": "book.opf", "mimeType": "text/xml"},
+        ],
+    }
+    assert resolve_folder_file("root", service_factory=lambda key: _DriveService(folders)) == (
+        "https://www.googleapis.com/drive/v3/files/epub?key=test-key&alt=media"
+    )
 
 
 def test_kindlebangla_resolve_asset_follows_redirect_to_drive_file(monkeypatch):

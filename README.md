@@ -51,7 +51,7 @@ Global flags (apply to every command):
 | `boighor` | https://boighorlibrary.com/ | sitemap | `/books/<slug>/` lending pages | metadata-only (lending, no files) |
 | `gutenberg_bengali` | https://www.gutenberg.org/ | sitemap (Bengali OPDS feed helper) | `/ebooks/<id>/` pages | official EPUB/PDF/MOBI/ZIP formats |
 | `ndli` | https://ndl.gov.in/ | sitemap | catalogue pages | metadata-only catalogue |
-| `kindlebangla` | https://www.kindlebangla.com/ | sitemap (`/book/<id-or-slug>`) | book pages + `/download/<slug>` handlers | `/download/` resolves via Drive API folder → single book file; needs `GOOGLE_DRIVE_API_KEY`, otherwise `unsupported` |
+| `kindlebangla` | https://www.kindlebangla.com/ | sitemap (`/book/<id-or-slug>`) | book pages + `/download/<slug>` handlers | `/download/` resolves via Drive API folder → book file; nested folders walked, EPUB > PDF, support files (`.opf`, cover, `.kfx`) ignored; needs `GOOGLE_DRIVE_API_KEY` |
 | `banglabook` | https://www.banglabook.org/ | sitemap (`post-sitemap`) | book posts | Drive / MediaFire / MEGA / Box / Dropbox links queued as assets |
 | `allbanglaboi` | https://allbanglaboi.com/ | catalogue (WordPress REST `wp/v2/posts`) | book posts | metadata-only catalogue |
 | `banglabooks_in` | https://www.banglabooks.in/ | sitemap (`post-sitemap`) | two-segment posts | Drive/file-host links queued as assets |
