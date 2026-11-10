@@ -208,6 +208,33 @@ Default extensions are `epub pdf mobi azw3`; `--max-mb` (default 512) caps
 per-file size; `--limit` bounds one run. Interrupted runs resume with the
 same command.
 
+## Curating downloaded EPUBs
+
+Scraped and Telegram EPUBs carry channel/site branding, injected promo pages
+and links. The curator rewrites them deterministically before import:
+
+```bash
+book-curate --input data/telegram/bongboi --out data/telegram/bongboi/curated
+book-curate --input data/telegram/bongboi --out data/telegram/bongboi/curated --limit 20
+book-curate --input data/telegram/bongboi --out data/telegram/bongboi/curated --force
+```
+
+For every book it writes `<sha256>.epub` plus `<sha256>.json` recording the
+source hash and what changed. It:
+
+- replaces publisher/source/rights/language/identifier with neutral values
+  (`OpenBanglaBooks`, `bn`, a deterministic UUID) and drops calibre/Sigil
+  metadata, scraped descriptions, fake dates and source contributors;
+- removes injected promo pages (reader ads, "About Contributor", "শেষ পৃষ্ঠা")
+  and promo blocks/paragraphs, including channel names and `t.me` links;
+- unwraps every hyperlink (internal TOC links are kept) and strips scripts,
+  iframes, remote images and `on*` handlers;
+- rebuilds the ZIP with fixed timestamps, so the same input yields the same
+  hash and re-imports are idempotent.
+
+Pages that cannot be curated safely (encrypted, malformed) are reported and
+left out; nothing is deleted from the source directory.
+
 ## Development
 
 ```bash

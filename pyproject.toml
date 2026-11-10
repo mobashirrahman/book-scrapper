@@ -23,6 +23,7 @@ telegram = ["telethon>=1.36,<2"]
 
 [project.scripts]
 book-scrapper = "book_scrapper.cli:main"
+book-curate = "book_scrapper.curate:main"
 
 [tool.setuptools.packages.find]
 include = ["book_scrapper*"]
